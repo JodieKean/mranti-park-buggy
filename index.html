@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUBE - Buggy Booking</title>
+<meta name="description" content="Book an autonomous buggy ride at MRANTI Park with CUBE, the MRANTI Intelligent Park Assistant. Interactive prototype by Kommu.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Exo:wght@600;700;800&amp;family=Lato:wght@400;700;900&amp;display=swap">
+<link rel="stylesheet" href="style.css">
+<script defer src="qrcode.js"></script>
+<script defer src="app.js"></script>
+</head>
+<body>
+<header class="header">
+  <div class="header-inner">
+    <a class="brand" href="#booking" aria-label="CUBE Buggy Booking"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><span><b>CUBE</b><small>MEET MRANTI INTELLIGENT<br>PARK ASSISTANT</small></span></a>
+    <nav aria-label="Prototype views">
+      <a href="#booking" data-view="booking">Buggy Booking</a>
+      <a href="#command" data-view="command">Command Centre</a>
+      <a href="#stakeholders" data-view="stakeholders">Stakeholders</a>
+    </nav>
+    <span class="demo">Simulation</span>
+  </div>
+</header>
+<main id="app"></main>
+<footer class="footer"><span>CUBE · MRANTI Park · Buggy Service Simulation</span><span>Platform by <strong>Kommu</strong></span></footer>
+<dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+<div id="toast" role="status" class="toast" hidden></div>
+</body>
+</html>
