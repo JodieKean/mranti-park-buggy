@@ -462,8 +462,9 @@ function render() {
     else link.removeAttribute("aria-current");
   }
   const markup = ({booking:renderBooking,command:renderCommand,stakeholders:renderStakeholders}[active])();
-  const keepMap = active === "booking" && app.querySelector("#booking-map");
-  const overview = active === "command" && app.querySelector("#command-overview");
+  let panel = app.querySelector('[data-view-panel="'+active+'"]');
+  const keepMap = active === "booking" && panel?.querySelector("#booking-map");
+  const overview = active === "command" && panel?.querySelector("#command-overview");
   if (keepMap || overview) {
     // Replace dashboard content without detaching either map iframe.
     const next = document.createElement("template");
@@ -471,7 +472,7 @@ function render() {
     let selectors;
     if (keepMap) {
       next.content.querySelector("#route-status").textContent =
-        app.querySelector("#route-status").textContent;
+        panel.querySelector("#route-status").textContent;
       selectors = [".intro", "#ride-plan", "#tickets"];
     } else {
       overview.hidden = opsTab !== "Overview";
@@ -479,25 +480,30 @@ function render() {
         "#command-overview > .table-card", ".ops-grid .map-head", ".ops-grid > .card-pad"];
     }
     for (const selector of selectors) {
-      app.querySelector(selector).replaceWith(next.content.querySelector(selector));
+      panel.querySelector(selector).replaceWith(next.content.querySelector(selector));
     }
   } else {
-    resetRouteRequest();
-    clearTimeout(mapLoadTimer);
-    mapReady = false;
-    app.innerHTML = markup;
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.dataset.viewPanel = active;
+      app.append(panel);
+    }
+    panel.innerHTML = markup;
+  }
+  for (const viewPanel of app.children) {
+    viewPanel.hidden = viewPanel !== panel;
   }
   if (active === "booking") {
     syncRoutePreview();
     if (!keepMap) {
-      const frame = app.querySelector("#booking-map");
+      const frame = panel.querySelector("#booking-map");
       if (new URL(frame.src).origin !== mapOrigin) {
         mapLoadTimer = setTimeout(() => useHostedMap(frame), 12000);
       }
       if (destination >= 0) previewRoute();
     }
   }
-  if (active === "command") sendFleetRoutes(app.querySelector("#fleet-map"));
+  if (active === "command") sendFleetRoutes(panel.querySelector("#fleet-map"));
 }
 function confirmAction(title, message, label, action, id) {
   dialog.innerHTML='<div class="stack"><h2 id="dialog-title">'+safe(title)+'</h2><p class="muted">'+safe(message)+'</p><div class="actions">'+button("Back","dismiss")+button(label,action,{variant:"primary",id})+'</div></div>';
@@ -595,6 +601,7 @@ document.addEventListener("click", event => {
     case "reset": confirmAction("Reset demonstration", "Restore the original settings and clear the demo bookings?", "Reset demo", "confirm-reset"); break;
     case "confirm-reset":
       dialog.close(); state=structuredClone(defaults); selectedVehicle=undefined; seats=1; origin=defaultPickup; destination=-1; save(); render(); announce("Demo reset");
+      if (app.querySelector("#booking-map")) previewRoute();
       break;
     case "dismiss": dialog.close(); break;
   }
