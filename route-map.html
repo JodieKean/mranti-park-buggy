@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MRANTI Park route preview</title>
+<style>
+  :is(#viewer-ui-desktop, #viewer-ui-mobile, #viewer-ui-mini) {
+    display: none !important;
+  }
+
+  .vehicle-marker {
+    position: relative;
+    display: block;
+    width: 42px;
+    height: 42px;
+  }
+
+  .vehicle-marker-code {
+    position: absolute;
+    top: 12px;
+    left: calc(100% + 3px);
+    display: block;
+    white-space: nowrap;
+    color: white;
+    border: 2px solid white;
+    border-radius: 6px;
+    padding: 3px 6px;
+    box-shadow: 0 2px 5px #090f5566;
+    font: 700 12px system-ui, sans-serif;
+  }
+
+  .gps-buggy {
+    position: absolute;
+    inset: 0;
+  }
+
+  .gps-buggy {
+    isolation: isolate;
+  }
+
+  .gps-buggy::before,
+  .gps-buggy::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 26px;
+    height: 42px;
+    transform: translate(-50%, -50%) rotate(calc(var(--gps-heading, 0deg) - var(--map-bearing, 0deg)));
+    pointer-events: none;
+  }
+
+  .gps-buggy::before {
+    background: url("buggy-marker.png") center / contain no-repeat;
+  }
+
+  .gps-buggy::after {
+    background: var(--buggy-roof-color, #2f17e9);
+    clip-path: inset(15% 22% 16% 22% round 24% / 12%);
+    mix-blend-mode: multiply;
+  }
+
+  [data-booking-markers] :is(
+    div[role="button"]:has(> #icon-person-18x18),
+    div:has(> .pin-shadow + svg[viewBox="0 0 20 48"]),
+    [id^="location-marker"]:has(#icon-flag-20x20),
+    #connection-marker
+  ) { visibility: hidden; }
+
+  .booking-start {
+    display: block;
+    width: 17px;
+    height: 17px;
+    box-sizing: border-box;
+    border: 3px solid white;
+    border-radius: 50%;
+    background: #2679e8;
+    box-shadow: 0 0 0 4px #2679e850;
+  }
+
+  .booking-destination {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    box-sizing: border-box;
+    border: 2px solid white;
+    border-radius: 50% 50% 50% 0;
+    background: #9b2677;
+    transform: translateY(-3px) rotate(-45deg);
+  }
+
+  .booking-destination::after {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: white;
+  }
+</style>
+<div id="viewer-app-root" style="position:fixed;inset:0"></div>
+<script type="module">
+  const parentOrigin = location.origin === "null" ? "*" : location.origin;
+  const report = (type, payload) => parent.postMessage({ type, payload }, parentOrigin);
+  const fleetMonitor = new URLSearchParams(location.search).has("fleet");
+  let viewer;
+  let fleetShapes = [];
+  let fleetRequest = "";
+  let fleetTimer;
+  let fleetAnimation;
+  let fleetRouteBounds = "";
+  const buggyMetresPerSecond = 3;
+  const idleHeadings = new Map();
+  let headingMap;
+  let bookingMarkers = [];
+
+  function routeHeading(route, index) {
+    const point = route[index];
+    if (!point) return undefined;
+    const differs = candidate => candidate.latitude !== point.latitude || candidate.longitude !== point.longitude;
+    const next = route.slice(index + 1).find(differs);
+    const previous = next ? point : route.slice(0, index).findLast(differs);
+    const end = next ?? point;
+    if (!previous) return undefined;
+    const east = (end.longitude - previous.longitude) * Math.cos(point.latitude * Math.PI / 180);
+    const north = end.latitude - previous.latitude;
+    return Math.atan2(east, north) * 180 / Math.PI;
+  }
+
+  function measureRoute(route) {
+    const distances = [0];
+    for (let index = 1; index < route.length; index++) {
+      const from = route[index - 1];
+      const to = route[index];
+      const east = (to.longitude - from.longitude) * Math.cos((from.latitude + to.latitude) * Math.PI / 360);
+      const north = to.latitude - from.latitude;
+      distances.push(distances[index - 1] + Math.hypot(east, north) * 111195);
+    }
+    return distances;
+  }
+
+  function routePosition(route, distances, startedAt, now) {
+    const metres = Math.max(0, (now - startedAt) / 1000 * buggyMetresPerSecond);
+    const next = distances.findIndex(distance => distance > metres);
+    if (next < 0) {
+      return { point: route.at(-1), index: route.length - 1, arrived: true };
+    }
+    const index = next - 1;
+    const from = route[index];
+    const to = route[next];
+    const progress = (metres - distances[index]) / (distances[next] - distances[index]);
+    return { index, arrived: false, point: {
+      latitude: from.latitude + (to.latitude - from.latitude) * progress,
+      longitude: from.longitude + (to.longitude - from.longitude) * progress
+    } };
+  }
+
+  function animateFleet(map, project) {
+    const now = Date.now();
+    let moving = false;
+    for (const vehicle of fleetShapes) {
+      if (!vehicle.marker || !vehicle.distances || vehicle.arrived) continue;
+      const { point, index, arrived } = routePosition(vehicle.route, vehicle.distances, vehicle.startedAt, now);
+      map.Markers.setPosition(vehicle.marker, project(point));
+      const heading = routeHeading(vehicle.route, index);
+      if (heading !== undefined) vehicle.buggy?.style.setProperty("--gps-heading", heading + "deg");
+      vehicle.arrived = arrived;
+      moving ||= !arrived;
+    }
+    fleetAnimation = moving ? requestAnimationFrame(() => animateFleet(map, project)) : undefined;
+  }
+
+  function trackMapBearing(map) {
+    if (headingMap === map) return;
+    headingMap = map;
+    const updateBearing = () => {
+      document.documentElement.style.setProperty("--map-bearing", map.Camera.bearing + "deg");
+    };
+    updateBearing();
+    map.on("camera-change", updateBearing);
+  }
+
+  function resolveStop(id) {
+    const place = id && viewer.resolvePlaces(id)?.[0];
+    return place && (place.spaces?.length ? place.spaces : place);
+  }
+
+  async function showFleet(vehicles, deadline = Date.now() + 12000) {
+    const map = viewer?.mapStore.mapView;
+    const request = JSON.stringify(vehicles);
+    const bounds = JSON.stringify(vehicles.map(({code, staging, pickup, dropOff}) => [code, staging, pickup, dropOff]));
+    clearTimeout(fleetTimer);
+    if (!viewer?.mapStore.initialized || !map) {
+      if (Date.now() < deadline) {
+        fleetTimer = setTimeout(() => showFleet(vehicles, deadline).catch(reportFleetError), 100);
+      } else {
+        reportFleetError();
+      }
+      return;
+    }
+    if (request === fleetRequest) return;
+    fleetRequest = request;
+    trackMapBearing(map);
+
+    const entries = await Promise.all(vehicles.map(async vehicle => {
+      const pickup = resolveStop(vehicle.pickup);
+      const dropOff = resolveStop(vehicle.dropOff);
+      let directions;
+      if (pickup && dropOff) {
+        try { directions = await map.getDirections(pickup, dropOff); } catch {}
+      }
+      const staging = resolveStop(vehicle.staging);
+      const location = (Array.isArray(staging) ? staging[0] : staging)?.center;
+      const coordinates = directions?.coordinates ?? [];
+      return { ...vehicle, coordinates, location };
+    }));
+    if (request !== fleetRequest) return;
+
+    cancelAnimationFrame(fleetAnimation);
+    for (const { path, marker } of fleetShapes) {
+      if (path) map.Paths.remove(path);
+      if (marker) map.Markers.remove(marker);
+    }
+    const overviewPoints = [];
+    const project = point => map.createCoordinate(point.latitude, point.longitude, viewer.outdoorFloor);
+    const now = Date.now();
+    fleetShapes = entries.map((vehicle, index) => {
+      const route = vehicle.coordinates.map(project);
+      const startedAt = Date.parse(vehicle.startedAt);
+      const distances = route.length > 1 && Number.isFinite(startedAt) ? measureRoute(route) : undefined;
+      const progress = distances ? routePosition(route, distances, startedAt, now) : undefined;
+      const point = (progress ? project(progress.point) : route[0]) ??
+        (vehicle.location && project(vehicle.location));
+      if (point) overviewPoints.push(point, ...route);
+      const path = route.length > 1 ? map.Paths.add(route, {
+        color: vehicle.color,
+        width: 5 - index * 0.6,
+        verticalOffset: 0.1 + index * 0.03
+      }) : undefined;
+      const label = document.createElement("span");
+      label.className = "vehicle-marker";
+      const buggy = document.createElement("span");
+      buggy.className = "gps-buggy";
+      buggy.setAttribute("aria-hidden", "true");
+      buggy.style.setProperty("--buggy-roof-color", vehicle.color);
+      if (!idleHeadings.has(vehicle.code)) idleHeadings.set(vehicle.code, Math.random() * 360);
+      const heading = routeHeading(route, progress?.index ?? 0) ?? idleHeadings.get(vehicle.code);
+      buggy.style.setProperty("--gps-heading", heading + "deg");
+      const code = document.createElement("span");
+      code.className = "vehicle-marker-code";
+      code.style.backgroundColor = vehicle.color;
+      code.textContent = vehicle.code;
+      label.append(buggy, code);
+      const marker = point && map.Markers.add(point, label.outerHTML, {
+        rank: "always-visible",
+        placement: "center"
+      });
+      return { path, marker, route, distances, startedAt, arrived: progress?.arrived,
+        buggy: marker?.contentEl?.querySelector(".gps-buggy") };
+    });
+    animateFleet(map, project);
+    if (overviewPoints.length && fleetRouteBounds !== bounds) {
+      fleetRouteBounds = bounds;
+      await map.Camera.focusOn(overviewPoints, {
+        pitch: 0,
+        duration: 600,
+        screenOffsets: { top: 75, right: 40, bottom: 42, left: 40 }
+      });
+    }
+  }
+
+  function clearBookingMarkers(map) {
+    if (map) bookingMarkers.forEach(marker => map.Markers.remove(marker));
+    bookingMarkers = [];
+    delete document.documentElement.dataset.bookingMarkers;
+  }
+
+  function showBookingMarkers(map, coordinates) {
+    clearBookingMarkers(map);
+    const start = coordinates[0];
+    const end = coordinates.at(-1);
+    const outdoor = point => map.createCoordinate(point.latitude, point.longitude, viewer.outdoorFloor);
+    bookingMarkers = [
+      map.Markers.add(outdoor(start), '<span class="booking-start" role="img" aria-label="Pickup"></span>',
+        {rank: "always-visible", placement: "center"}),
+      map.Markers.add(outdoor(end), '<span class="booking-destination" role="img" aria-label="Drop-off"></span>',
+        {rank: "always-visible", placement: "top"})
+    ].filter(Boolean);
+    if (bookingMarkers.length) document.documentElement.dataset.bookingMarkers = "";
+  }
+
+  function reportFleetError() {
+    report("fleet-routes-unavailable");
+  }
+
+  window.addEventListener("message", event => {
+    if (fleetMonitor && event.source === parent && event.origin === location.origin &&
+        event.data?.type === "fleet-routes" && Array.isArray(event.data.payload)) {
+      showFleet(event.data.payload).catch(reportFleetError);
+    }
+  });
+
+  // Mappedin's set-state command exits directions but keeps the location selected.
+  window.addEventListener("message", event => {
+    if (fleetMonitor || event.source !== parent || event.origin !== location.origin ||
+        event.data?.type !== "set-state") return;
+    clearBookingMarkers(viewer?.mapStore.mapView);
+    if (event.data.payload?.state === "/") viewer?.setSelectedPlaces(undefined);
+  });
+
+  try {
+    const mapId = "686e226a0c030e000b832a48";
+    const dataUrl = new URL("map-index", location.href);
+    const index = await fetch(dataUrl.href + "?venue=" + mapId + "&version=2.0.0");
+    if (!index.ok || !index.headers.get("Content-Type")?.includes("application/json")) {
+      throw new Error("Map index unavailable");
+    }
+    // Keep the same viewer version as the public MRANTI Park embed.
+    const { default: start } = await import("https://cdn.jsdelivr.net/npm/@mappedin/viewer@0.59.10/dist/index.js");
+    start({
+      mapId,
+      dataUrl: dataUrl.href,
+      themeOverride: { map: { tiles: "https://tiles.openfreemap.org/styles/liberty" } },
+      baseUrl: location.pathname,
+      hideMapIdInUrl: true,
+      hideRouterState: true,
+      disableAnalytics: true,
+      onlineDirections: false,
+      onRootStore: root => { viewer = root; },
+      onReceivedDirections: async directions => {
+        const pickup = viewer?.departures?.[0]?.id;
+        const dropOff = viewer?.selectedPlaces?.[0]?.id;
+        const endpoints = { pickup, dropOff };
+        const map = viewer?.mapStore.mapView;
+        if (!directions?.coordinates.length || !map) {
+          report("route-preview-unavailable", endpoints);
+          return;
+        }
+        // Ten percent padding on each edge keeps the route in the central 80%.
+        const horizontal = Math.max(24, Math.round(innerWidth * 0.1));
+        const vertical = Math.max(24, Math.round(innerHeight * 0.1));
+        try {
+          if (!fleetMonitor) showBookingMarkers(map, directions.coordinates);
+          await map.Camera.focusOn(directions.coordinates, {
+            pitch: 0,
+            duration: 600,
+            screenOffsets: { top: vertical, right: horizontal, bottom: vertical, left: horizontal }
+          });
+          if (viewer.mapStore.directions.directions === directions &&
+              viewer.departures?.[0]?.id === pickup && viewer.selectedPlaces?.[0]?.id === dropOff) {
+            report("route-preview-ready", endpoints);
+          }
+        } catch {
+          report("route-preview-unavailable", endpoints);
+        }
+      }
+    });
+  } catch {
+    report("route-map-unavailable");
+  }
+</script>
+</html>
