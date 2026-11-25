@@ -18,7 +18,8 @@ const defaultPickup = stops.indexOf("Parking MLP 2");
 const boardingWarning = "Board only with the number of passengers on your booking. Extra passengers may delay departure or prevent the buggy from operating.";
 
 function bookingStop(value) {
-  return safe(typeof value === "number" ? legacyStops[value] : value);
+  const name = typeof value === "number" ? legacyStops[value] : value;
+  return safe(name ?? "—");
 }
 
 function ticketQr(code) {
@@ -120,6 +121,14 @@ function vehicleBooking(vehicle) {
 }
 function vehicleAvailable(vehicle) {
   return fleet.includes(vehicle) && vehicleReady(vehicle) && !vehicleBooking(vehicle);
+}
+function canStartRide(booking) {
+  return booking?.status === "Booked" && vehicleReady(booking.vehicle) && vehicleBooking(booking.vehicle) === booking;
+}
+function startRide(booking, message) {
+  booking.status = "Checked in";
+  booking.startedAt = new Date().toISOString();
+  update(message);
 }
 function vehicleStatus(vehicle) {
   if (!vehicleReady(vehicle)) return "Out of service";
@@ -349,6 +358,7 @@ const rideTimeOptions = {
 const rideTimeFormat = new Intl.DateTimeFormat("en-MY", rideTimeOptions);
 const recordRideTimeFormat = new Intl.DateTimeFormat("en-MY", { ...rideTimeOptions, second: "2-digit" });
 const rideTimeHeaders = '<th class="nowrap">Time booked</th><th class="nowrap">Time start</th><th class="nowrap">Time end</th>';
+const rideDurationHeaders = '<th class="nowrap">Wait time</th><th class="nowrap">Trip time</th>';
 
 function rideTimeCell(value, formatter = rideTimeFormat) {
   return '<td class="nowrap">'+(value
@@ -374,18 +384,23 @@ function rideDurationCell(start, end, running, now) {
   return '<td class="nowrap"'+timer+'>'+formatRideDuration(from, to)+'</td>';
 }
 
+function rideDurationCells(booking, now) {
+  return rideDurationCell(booking.bookedAt, booking.startedAt, booking.status === "Booked", now) +
+    rideDurationCell(booking.startedAt, booking.endedAt, booking.status === "Checked in", now);
+}
+
 function rideTable() {
   const rides = state.bookings.filter(activeRide);
   const now = Date.now();
   const rows = rides.map(booking => '<tr><td class="ticket-code">'+safe(booking.code)+'</td><td>'+safe(booking.vehicle)+'</td><td>'+bookingStop(booking.origin)+' → '+bookingStop(booking.destination)+'</td><td>'+booking.seats+'</td>'+
-    rideTimeCell(booking.bookedAt)+
-    rideDurationCell(booking.bookedAt, booking.startedAt, booking.status === "Booked", now)+
-    rideDurationCell(booking.startedAt, booking.endedAt, booking.status === "Checked in", now)+
+    rideTimeCell(booking.bookedAt)+rideDurationCells(booking, now)+
     '<td>'+pill(booking.status,"good")+'</td><td><div class="actions">'+
     button("Contact driver","contact-ride-driver",{id:booking.code,variant:"small nowrap"})+
-    (booking.status === "Checked in" ? button("Complete ride","complete-ride",{id:booking.code,variant:"small nowrap"}) : '')+'</div></td></tr>').join("");
+    (booking.status === "Booked"
+      ? button("Start ride", "start-ride", {id:booking.code, variant:"small nowrap", disabled:!canStartRide(booking)})
+      : button("Complete ride", "complete-ride", {id:booking.code, variant:"small nowrap"}))+'</div></td></tr>').join("");
   return '<section class="card table-card"><div class="card-head"><h2>Active rides</h2></div>'+
-    (rows ? '<div class="table-scroll"><table><thead><tr><th>Booking</th><th>Vehicle</th><th>Route</th><th>Passengers</th><th class="nowrap">Time booked</th><th class="nowrap">Wait time</th><th class="nowrap">Trip time</th><th>Status</th><th>Action</th></tr></thead><tbody>'+rows+'</tbody></table></div>' : '<p class="empty">No active rides.</p>')+'</section>';
+    (rows ? '<div class="table-scroll"><table><thead><tr><th>Booking</th><th>Vehicle</th><th>Route</th><th>Passengers</th><th class="nowrap">Time booked</th>'+rideDurationHeaders+'<th>Status</th><th>Action</th></tr></thead><tbody>'+rows+'</tbody></table></div>' : '<p class="empty">No active rides.</p>')+'</section>';
 }
 
 function renderOverview() {
@@ -433,13 +448,20 @@ function operationLogTime(item) {
   return time.startsWith(item.time + ":") ? time : item.time;
 }
 
+function operationLogDescription(description) {
+  return description
+    .replace(/^(Booking confirmed|Booking cancelled|QR check-in accepted|Ride started|Ride completed) · (CUBE-\d+)(?= · |$)/, "$2 · $1")
+    .replace(/^(Simulated contact with .+ · BGY-\d+) · (CUBE-\d+)$/, "$2 · $1");
+}
+
 function renderRecords() {
+  const now = Date.now();
   return '<div class="stack"><section class="card table-card"><div class="card-head"><div><h2>Trips Booked</h2><p class="sub">Reservations created in this simulation</p></div></div>'+
-  (state.bookings.length ? '<div class="table-scroll"><table><thead><tr><th>Reference</th><th>Vehicle</th><th>Seats</th>'+rideTimeHeaders+'<th>Status</th></tr></thead><tbody>'+
-    state.bookings.map(item=>'<tr><td class="ticket-code">'+safe(item.code)+'</td><td>'+safe(item.vehicle)+'</td><td>'+item.seats+'</td>'+
-      rideTimeCells(item)+'<td>'+pill(item.status,item.status==="Cancelled"?"neutral":"good")+'</td></tr>').join("")+
+  (state.bookings.length ? '<div class="table-scroll"><table><thead><tr><th>Reference</th><th>Vehicle</th><th>Pickup</th><th>Drop-off</th><th>Seats</th>'+rideTimeHeaders+rideDurationHeaders+'<th>Status</th></tr></thead><tbody>'+
+    state.bookings.map(item=>'<tr><td class="ticket-code">'+safe(item.code)+'</td><td>'+safe(item.vehicle)+'</td><td>'+bookingStop(item.origin)+'</td><td>'+bookingStop(item.destination)+'</td><td>'+item.seats+'</td>'+
+      rideTimeCells(item)+rideDurationCells(item, now)+'<td>'+pill(item.status,item.status==="Cancelled"?"neutral":"good")+'</td></tr>').join("")+
     '</tbody></table></div>' : '<p class="empty">Book a ride in CUBE to populate the manifest.</p>')+
-  '</section><section class="card table-card"><div class="card-head"><div><h2>Operations log</h2><p class="sub">Simulated records for the MRANTI data pipeline</p></div></div>'+state.activity.slice(0,15).map(item=>'<div class="incident-row"><div class="space-between"><span>'+safe(item.description)+'</span><time class="sub nowrap">'+safe(operationLogTime(item))+'</time></div></div>').join("")+'</section></div>';
+  '</section><section class="card table-card"><div class="card-head"><div><h2>Operations log</h2><p class="sub">Simulated records for the MRANTI data pipeline</p></div></div>'+state.activity.slice(0,15).map(item=>'<div class="incident-row"><div class="space-between"><span>'+safe(operationLogDescription(item.description))+'</span><time class="sub nowrap">'+safe(operationLogTime(item))+'</time></div></div>').join("")+'</section></div>';
 }
 
 function renderCommand() {
@@ -558,6 +580,9 @@ document.addEventListener("click", event => {
     case "contact-ride-driver":
       if (booking && activeRide(booking)) contactSafetyDriver(booking.vehicle, booking.code);
       break;
+    case "start-ride":
+      if (canStartRide(booking)) startRide(booking, "Ride started · " + booking.code);
+      break;
     case "complete-ride":
       if (booking?.status === "Checked in") {
         booking.status = "Completed";
@@ -640,7 +665,7 @@ document.addEventListener("submit", event => {
       result.textContent = "This booking code is missing, cancelled or already checked in.";
       return;
     }
-    if (!vehicleReady(booking.vehicle) || vehicleBooking(booking.vehicle) !== booking) {
+    if (!canStartRide(booking)) {
       result.textContent = "Boarding is on hold for this buggy.";
       return;
     }
@@ -650,9 +675,7 @@ document.addEventListener("submit", event => {
         : "The passenger count must match the booking before check-in.";
       return;
     }
-    booking.status = "Checked in";
-    booking.startedAt = new Date().toISOString();
-    update("QR check-in accepted · " + booking.code + " · " + headcount + " passengers");
+    startRide(booking, "QR check-in accepted · " + booking.code + " · " + headcount + " passengers");
     document.querySelector("#entrance-result").textContent = "Boarding check-in accepted for " + booking.code + ".";
     return;
   }
@@ -681,9 +704,10 @@ document.addEventListener("submit", event => {
 window.addEventListener("hashchange",()=>{ render(); window.scrollTo(0,0); });
 render();
 setInterval(() => {
-  if (location.hash !== "#command" || opsTab !== "Overview") return;
+  if (location.hash !== "#command") return;
+  const tab = opsTab === "Overview" ? "#command-overview" : "#command-tab";
   const now = Date.now();
-  for (const cell of app.querySelectorAll("[data-ride-timer]")) {
+  for (const cell of app.querySelectorAll(tab + " [data-ride-timer]")) {
     cell.textContent = formatRideDuration(Number(cell.dataset.rideTimer), now);
   }
 }, 1000);
